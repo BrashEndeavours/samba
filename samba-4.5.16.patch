@@ -1,0 +1,194 @@
+--- ../samba-samba-4.5.16/source3/client/client.c.bak	2019-09-02 18:52:49.571046887 -0400
++++ ../samba-samba-4.5.16/source3/client/client.c	2019-09-02 20:48:23.167990658 -0400
+@@ -1216,6 +1216,68 @@
+ 	return do_get(rname, lname, false);
+ }
+ 
++static int cmd_dump(void)
++{
++	TALLOC_CTX *pctx = talloc_tos();
++	char *rname = NULL;
++	char *fname = NULL;
++
++	TALLOC_CTX *ctx;
++	int handle = fileno(stdout);
++	uint16_t fnum;
++	off_t size;
++	off_t start = 0;
++	off_t nread = 0;
++	struct cli_state *targetcli;
++	char *targetname;
++	NTSTATUS status;
++
++	rname = talloc_strdup(pctx, client_get_cur_dir());
++	if (!rname) {
++		return 1;
++	}
++
++	if (!next_token_talloc(pctx, &cmd_ptr,&fname,NULL)) {
++		d_printf("dump <filename>\n");
++		return 1;
++	}
++	rname = talloc_asprintf_append(rname, "%s", fname);
++	if (!rname) {
++		return 1;
++	}
++	rname = clean_name(pctx, rname);
++	if (!rname) {
++		return 1;
++	}
++
++	while (1) {
++		status = cli_open(cli, rname, O_RDONLY, DENY_NONE, &fnum);
++		if (!NT_STATUS_IS_OK(status)) {
++			/* eh, we expected this */
++			continue;
++		}
++
++		size = 4096;
++
++		//DEBUG(1,("getting file %s of size %.0f as - ",
++		//	 rname, (double)size));
++
++		status = cli_pull(cli, fnum, start, size, io_bufsize,
++				  writefile_sink, (void *)&handle, &nread);
++		if (!NT_STATUS_IS_OK(status)) {
++			d_fprintf(stderr, "parallel_read returned %s\n",
++				  nt_errstr(status));
++			cli_close(cli, fnum);
++			continue;
++		}
++
++		status = cli_close(cli, fnum);
++		if (!NT_STATUS_IS_OK(status)) {
++			d_printf("Error %s closing remote file\n", nt_errstr(status));
++		}
++	}
++}
++
+ /****************************************************************************
+  Do an mget operation on one file.
+ ****************************************************************************/
+@@ -3864,6 +3926,106 @@
+ 	return 0;
+ }
+ 
++static int cmd_rename_loop(void)
++{
++	TALLOC_CTX *ctx = talloc_tos();
++	char *src1, *src2, *dest;
++	char *buf1, *buf2, *buf3;
++	struct cli_state *targetcli;
++	char *targetsrc1, *targetsrc2;
++	char *targetdest;
++        NTSTATUS status;
++
++	if (!next_token_talloc(ctx, &cmd_ptr,&buf1,NULL) ||
++	    !next_token_talloc(ctx, &cmd_ptr,&buf2,NULL) ||
++	    !next_token_talloc(ctx, &cmd_ptr,&buf3,NULL)) {
++		d_printf("rename_loop <src1> <src2> <dest>\n");
++		return 1;
++	}
++
++	src1 = talloc_asprintf(ctx,
++			"%s%s",
++			client_get_cur_dir(),
++			buf1);
++	if (!src1) {
++		return 1;
++	}
++
++	src2 = talloc_asprintf(ctx,
++			"%s%s",
++			client_get_cur_dir(),
++			buf2);
++	if (!src2) {
++		return 1;
++	}
++
++	dest = talloc_asprintf(ctx,
++			"%s%s",
++			client_get_cur_dir(),
++			buf3);
++	if (!dest) {
++		return 1;
++	}
++
++	status = cli_resolve_path(ctx, "", auth_info, cli, src1, &targetcli,
++				  &targetsrc1);
++	if (!NT_STATUS_IS_OK(status)) {
++		d_printf("rename %s: %s\n", src1, nt_errstr(status));
++		return 1;
++	}
++
++	status = cli_resolve_path(ctx, "", auth_info, cli, src2, &targetcli,
++				  &targetsrc2);
++	if (!NT_STATUS_IS_OK(status)) {
++		d_printf("rename %s: %s\n", src2, nt_errstr(status));
++		return 1;
++	}
++
++	status = cli_resolve_path(ctx, "", auth_info, cli, dest, &targetcli,
++				  &targetdest);
++	if (!NT_STATUS_IS_OK(status)) {
++		d_printf("rename %s: %s\n", dest, nt_errstr(status));
++		return 1;
++	}
++
++	while (1) {
++		status = cli_rename(targetcli, targetsrc1, targetdest);
++		if (!NT_STATUS_IS_OK(status)) {
++			d_printf("%s renaming files %s -> %s \n",
++				nt_errstr(status),
++				targetsrc1,
++				targetdest);
++			return 1;
++		}
++		status = cli_rename(targetcli, targetdest, targetsrc1);
++		if (!NT_STATUS_IS_OK(status)) {
++			d_printf("%s renaming files %s -> %s \n",
++				nt_errstr(status),
++				targetdest,
++				targetsrc1);
++			return 1;
++		}
++		status = cli_rename(targetcli, targetsrc2, targetdest);
++		if (!NT_STATUS_IS_OK(status)) {
++			d_printf("%s renaming files %s -> %s \n",
++				nt_errstr(status),
++				targetsrc2,
++				targetdest);
++			return 1;
++		}
++		status = cli_rename(targetcli, targetdest, targetsrc2);
++		if (!NT_STATUS_IS_OK(status)) {
++			d_printf("%s renaming files %s -> %s \n",
++				nt_errstr(status),
++				targetdest,
++				targetsrc2);
++			return 1;
++		}
++	}
++
++	return 0;
++}
++
+ struct scopy_timing {
+ 	struct timespec tp_start;
+ };
+@@ -4960,6 +5122,7 @@
+   {"close",cmd_close,"<fid> close a file given a fid",{COMPL_REMOTE,COMPL_NONE}},
+   {"del",cmd_del,"<mask> delete all matching files",{COMPL_REMOTE,COMPL_NONE}},
+   {"dir",cmd_dir,"<mask> list the contents of the current directory",{COMPL_REMOTE,COMPL_NONE}},
++  {"dump",cmd_dump,"<remote name> repeatedly try to dump a file",{COMPL_NONE,COMPL_NONE}},
+   {"du",cmd_du,"<mask> computes the total size of the current directory",{COMPL_REMOTE,COMPL_NONE}},
+   {"echo",cmd_echo,"ping the server",{COMPL_NONE,COMPL_NONE}},
+   {"exit",cmd_quit,"logoff the server",{COMPL_NONE,COMPL_NONE}},
+@@ -5006,6 +5169,7 @@
+   {"recurse",cmd_recurse,"toggle directory recursion for mget and mput",{COMPL_NONE,COMPL_NONE}},
+   {"reget",cmd_reget,"<remote name> [local name] get a file restarting at end of local file",{COMPL_REMOTE,COMPL_LOCAL}},
+   {"rename",cmd_rename,"<src> <dest> rename some files",{COMPL_REMOTE,COMPL_REMOTE}},
++  {"rename_loop",cmd_rename_loop,"<src1> <src2> <dest> rename some files repeatedly",{COMPL_REMOTE,COMPL_REMOTE}},
+   {"reput",cmd_reput,"<local name> [remote name] put a file restarting at end of remote file",{COMPL_LOCAL,COMPL_REMOTE}},
+   {"rm",cmd_del,"<mask> delete all matching files",{COMPL_REMOTE,COMPL_NONE}},
+   {"rmdir",cmd_rmdir,"<directory> remove a directory",{COMPL_REMOTE,COMPL_NONE}},
